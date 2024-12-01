@@ -1,0 +1,11 @@
+[package]
+name = "scan_read_monoio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures = "0.3.31"
+futures-util = "0.3.31"
+monoio = { version = "0.2.4", features = ["async-cancel", "sync", "signal", "tracing", "zero-copy", "bytes", "legacy", "macros", "utils", "io-uring", "iouring"] }
+pin-project = "1.1.7"
+rand = "0.8"
