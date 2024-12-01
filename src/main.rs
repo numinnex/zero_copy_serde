@@ -40,26 +40,26 @@ async fn main() {
 
     let messages = generate_messages_1gb();
     let mut position = 0;
-    let bytes = messages
-        .into_iter()
-        .map(|msg| {
-            let size = msg.total_length();
-            let size_aligned = dma_buf::val_align_up(size as u64, 4096);
-            let mut buf = DmaBuf::new(size_aligned as usize);
-            msg.extend(buf.as_mut());
-            let return_val = (position, buf);
-            position += size_aligned;
-            return_val
-        });
+    let bytes = messages.into_iter().map(|msg| {
+        let size = msg.total_length();
+        let size_aligned = dma_buf::val_align_up(size as u64, 4096);
+        let mut buf = DmaBuf::new(size_aligned as usize);
+        msg.extend(buf.as_mut());
+        let return_val = (position, buf);
+        position += size_aligned;
+        return_val
+    });
     let file = Rc::new(file);
-    futures_util::stream::iter(bytes).for_each_concurrent(None, |(position, bytes)| {
-        let file = file.clone();
-        async move {
+    futures_util::stream::iter(bytes)
+        .for_each_concurrent(None, |(position, bytes)| {
             let file = file.clone();
-            let (result,_ ) = file.write_all_at(bytes, position).await;
-            result.unwrap();
-        }
-    }).await;
+            async move {
+                let file = file.clone();
+                let (result, _) = file.write_all_at(bytes, position).await;
+                result.unwrap();
+            }
+        })
+        .await;
     /*
         let storage = Storage::new(file);
         let log: Log<Storage, DmaBuf> = Log::new(storage, block_size);
@@ -82,7 +82,7 @@ impl Message {
 
     fn extend(&self, buffer: &mut [u8]) {
         // Serialize and append each field to the buffer.
-        let len = self.total_length() as usize; 
+        let len = self.total_length() as usize;
         buffer[0..4].copy_from_slice(&self.length.to_le_bytes());
         buffer[4..20].copy_from_slice(&self.id.to_le_bytes());
         buffer[20..28].copy_from_slice(&self.offset.to_le_bytes());
@@ -148,10 +148,8 @@ where
 }
 
 impl Storage {
-    pub fn new(file: File) -> Self {
-        Self {
-            file: Rc::new(file),
-        }
+    pub fn new(file: Rc<File>) -> Self {
+        Self { file }
     }
 }
 
