@@ -8,7 +8,7 @@ use std::{
 
 use dma_buf::{DmaBuf, IoBuf};
 use futures::{Future, FutureExt, Stream};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use monoio::{
     buf::IoBufMut,
     fs::{File, OpenOptions},
@@ -37,9 +37,34 @@ async fn main() {
         .open(file_path)
         .await
         .unwrap();
-    let storage = Storage::new(file);
-    let log: Log<Storage, DmaBuf> = Log::new(storage, block_size);
-    let reader = log.read_blocks(0, 1000).into_async_read();
+
+    let messages = generate_messages_1gb();
+    let mut position = 0;
+    let bytes = messages
+        .into_iter()
+        .map(|msg| {
+            let size = msg.total_length();
+            let size_aligned = dma_buf::val_align_up(size as u64, 4096);
+            let mut buf = DmaBuf::new(size_aligned as usize);
+            msg.extend(buf.as_mut());
+            let return_val = (position, buf);
+            position += size_aligned;
+            return_val
+        });
+    let file = Rc::new(file);
+    futures_util::stream::iter(bytes).for_each_concurrent(None, |(position, bytes)| {
+        let file = file.clone();
+        async move {
+            let file = file.clone();
+            let (result,_ ) = file.write_all_at(bytes, position).await;
+            result.unwrap();
+        }
+    }).await;
+    /*
+        let storage = Storage::new(file);
+        let log: Log<Storage, DmaBuf> = Log::new(storage, block_size);
+        let reader = log.read_blocks(0, 1000).into_async_read();
+    */
 }
 
 pub struct Message {
@@ -57,11 +82,12 @@ impl Message {
 
     fn extend(&self, buffer: &mut [u8]) {
         // Serialize and append each field to the buffer.
+        let len = self.total_length() as usize; 
         buffer[0..4].copy_from_slice(&self.length.to_le_bytes());
         buffer[4..20].copy_from_slice(&self.id.to_le_bytes());
         buffer[20..28].copy_from_slice(&self.offset.to_le_bytes());
         buffer[28..36].copy_from_slice(&self.timestamp.to_le_bytes());
-        buffer[36..].copy_from_slice(&self.bytes);
+        buffer[36..len].copy_from_slice(&self.bytes);
     }
 
     fn from_bytes(data: &[u8]) -> Self {

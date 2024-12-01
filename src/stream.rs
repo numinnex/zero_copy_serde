@@ -1,7 +1,6 @@
 use std::{pin::Pin, task::Poll};
 
-use futures::Stream;
-use futures_util::AsyncBufRead;
+use futures::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, FutureExt, Stream};
 use monoio::buf::IoBufMut;
 use pin_project::pin_project;
 
@@ -22,7 +21,7 @@ where
 }
 
 #[pin_project]
-pub struct RetainedMessageStream<R>
+pub struct MessageStream<R>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -115,7 +114,7 @@ where
                             return Some(Err(e.into())).into();
                         }
                         *this.read_bytes += length as u64 + 4;
-                        if this.read_bytes >= this.message_length {
+                        if *this.read_bytes >= *this.message_length as u64 {
                             // This is a temp solution, to the padding that Direct I/O requires.
                             // Later on, we could encode that information in our batch header
                             // for example Header { batch_length: usize, padding: usize }
@@ -124,15 +123,15 @@ where
                             let total_batch_length = *this.batch_length + RETAINED_BATCH_OVERHEAD;
                             let adjusted_size = io::val_align_up(total_batch_length, *this.sector_size);
                             */
-                            let total_batch_length = *this.message_length + 4;
+                            let total_batch_length = (*this.message_length + 4) as u64;
                             let adjusted_size =
                                 dma_buf::val_align_up(total_batch_length, *this.sector_size);
                             let diff = adjusted_size - total_batch_length;
                             this.reader.consume_unpin(diff as _);
-                            *this.header_read = false;
+                            *this.message_length = 0;
                         }
 
-                        let message = RetainedMessage::try_from_bytes(payload.freeze()).unwrap();
+                        let message = Message::from_bytes(&payload);
                         return Poll::Ready(Some(Ok(message)));
                     }
                     Reading::Message => {
@@ -142,7 +141,7 @@ where
                             return Some(Err(e.into())).into();
                         }
                         *this.read_bytes += *this.message_length as u64 + 4;
-                        if this.read_bytes >= this.message_length {
+                        if *this.read_bytes >= (*this.message_length + 4) as u64 {
                             // This is a temp solution, to the padding that Direct I/O requires.
                             // Later on, we could encode that information in our batch header
                             // for example Header { batch_length: usize, padding: usize }
@@ -151,16 +150,15 @@ where
                             let total_batch_length = *this.batch_length + RETAINED_BATCH_OVERHEAD;
                             let adjusted_size = io::val_align_up(total_batch_length, *this.sector_size);
                             */
-                            let total_batch_length = *this.message_length + 4;
-                            let sectors = total_batch_length.div_ceil(*this.sector_size);
+                            let total_batch_length = (*this.message_length + 4) as u64;
                             let adjusted_size =
                                 dma_buf::val_align_up(total_batch_length, *this.sector_size);
                             let diff = adjusted_size - total_batch_length;
                             this.reader.consume_unpin(diff as _);
-                            *this.header_read = false;
+                            *this.message_length = 0;
                         }
 
-                        let message = RetainedMessage::try_from_bytes(buf.into()).unwrap();
+                        let message: Message = Message::from_bytes(&buf);
                         return Poll::Ready(Some(Ok(message)));
                     }
                 }
@@ -180,7 +178,7 @@ where
             return Some(Err(e.into())).into();
         }
         *this.read_bytes += length as u64 + 4;
-        if this.read_bytes >= this.message_length {
+        if *this.read_bytes >= (*this.message_length + 4) as u64 {
             // This is a temp solution, to the padding that Direct I/O requires.
             // Later on, we could encode that information in our batch header
             // for example Header { batch_length: usize, padding: usize }
@@ -189,14 +187,14 @@ where
             let total_batch_length = *this.batch_length + RETAINED_BATCH_OVERHEAD;
             let adjusted_size = io::val_align_up(total_batch_length, *this.sector_size);
             */
-            let total_batch_length = *this.message_length + 4;
+            let total_batch_length = (*this.message_length + 4) as u64;
             let adjusted_size = dma_buf::val_align_up(total_batch_length, *this.sector_size);
             let diff = adjusted_size - total_batch_length;
             this.reader.consume_unpin(diff as _);
-            *this.header_read = false;
+            *this.message_length = 0;
         }
 
-        let message = RetainedMessage::try_from_bytes(payload.freeze()).unwrap();
+        let message = Message::from_bytes(&payload);
         Poll::Ready(Some(Ok(message)))
     }
 }
