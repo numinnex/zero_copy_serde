@@ -24,10 +24,10 @@ pub mod storage;
 pub mod stream;
 const O_DIRECT: i32 = 0x4000;
 
-#[monoio::main(worker_threads = 1, driver = "io_uring", entries = 512)]
+#[monoio::main(worker_threads = 1, driver = "io_uring", entries = 1024)]
 async fn main() {
     let file_path = "test";
-    let block_size = 1000 * 4096;
+    let block_size = 100 * 4096;
 
     let file = OpenOptions::new()
         .read(true)
@@ -38,7 +38,7 @@ async fn main() {
         .await
         .unwrap();
 
-    let messages = generate_messages_1gb();
+    let (messages, max_offset) = generate_messages_1gb();
     let mut position = 0;
     let bytes = messages.into_iter().map(|msg| {
         let size = msg.total_length();
@@ -76,9 +76,11 @@ async fn main() {
     let log: Log<Storage, DmaBuf> = Log::new(storage, block_size);
     let reader = log.read_blocks(0, limit).into_async_read();
     let stream = MessageStream::new(reader, 4096);
-    let messages = stream
-        .inspect_ok(|msg| println!("message offset: {}", msg.offset))
-        .try_collect::<Vec<_>>().await.unwrap();
+    let _messages = stream
+        .inspect_ok(|msg| println!("message offset: {}, max_offset: {}", msg.offset, max_offset))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
 
     println!("done reading messages");
 }
@@ -123,13 +125,14 @@ impl Message {
     }
 }
 
-fn generate_messages_1gb() -> Vec<Message> {
+fn generate_messages_1gb() -> (Vec<Message>, u64) {
     let mut rng = rand::thread_rng();
     let mut total_size: usize = 0;
     let mut messages = Vec::new();
 
     let mut i = 0;
     while total_size < 1_073_741_824 {
+        i += 1;
         let message_length = rng.gen_range(1024..8192);
         let bytes: Vec<u8> = (0..message_length).map(|_| rng.gen()).collect();
         let message = Message {
@@ -139,13 +142,12 @@ fn generate_messages_1gb() -> Vec<Message> {
             timestamp: i,
             bytes,
         };
-        i += 1;
 
         total_size += message.total_length() as usize;
         messages.push(message);
     }
 
-    messages
+    (messages, i)
 }
 
 pub struct Storage {
@@ -220,7 +222,11 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
-        if *this.position > *this.limit {
+        if *this.position >= *this.limit {
+            println!(
+                "reached here, with position: {}, limit: {}",
+                *this.position, *this.limit
+            );
             return Poll::Ready(None);
         }
 
@@ -228,7 +234,7 @@ where
             let (result, buf) = futures::ready!(fut.poll(cx));
             match result {
                 Ok(_) => {
-                    *this.position += *this.size as u64;
+                    *this.position += buf.len() as u64;
                     this.future.set(None);
                     return Poll::Ready(Some(Ok(buf)));
                 }
@@ -243,7 +249,7 @@ where
             match fut.poll_unpin(cx) {
                 Poll::Ready((result, buf)) => match result {
                     Ok(_) => {
-                        *this.position += *this.size as u64;
+                        *this.position += buf_size as u64;
                         this.future.set(None);
                         return Poll::Ready(Some(Ok(buf)));
                     }

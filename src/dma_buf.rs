@@ -49,11 +49,7 @@ pub struct DmaBuf {
     size: usize,
 }
 
-impl DmaBuf {
-    pub fn len(&self) -> usize {
-        self.size
-    }
-}
+impl DmaBuf {}
 
 // SAFETY: fuck safety.
 unsafe impl Send for DmaBuf {}
@@ -84,6 +80,10 @@ impl IoBuf for DmaBuf {
         unsafe { std::slice::from_raw_parts_mut(self.as_ptr_mut(), self.size) }
     }
 
+    fn len(&self) -> usize {
+        self.size
+    }
+
     fn new(size: usize) -> Self {
         assert!(size > 0);
         assert!(size % 512 == 0);
@@ -110,6 +110,7 @@ impl AsMut<[u8]> for DmaBuf {
 
 pub trait IoBuf: AsRef<[u8]> + AsMut<[u8]> {
     fn new(size: usize) -> Self;
+    fn len(&self) -> usize;
     fn as_ptr(&self) -> *const u8;
     fn as_ptr_mut(&mut self) -> *mut u8;
     fn as_bytes(&self) -> &[u8];

@@ -1,7 +1,7 @@
 use std::{pin::Pin, task::Poll};
 
 use futures::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, FutureExt, Stream};
-use monoio::buf::IoBufMut;
+use monoio::{buf::IoBufMut, io::BufReader};
 use pin_project::pin_project;
 
 use crate::{
@@ -88,6 +88,13 @@ where
                         return Poll::Pending;
                     }
                 };
+
+                if n == 0 {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "EOF reached",
+                    )));
+                }
                 read_offset += n;
             }
             Poll::Ready(Ok(()))
@@ -101,6 +108,9 @@ where
                         if let Err(e) =
                             futures::ready!(read_exact(Reading::Length, &mut buf[read..], cx))
                         {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                return Poll::Ready(None);
+                            }
                             return Some(Err(e.into())).into();
                         }
                         let length = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -110,6 +120,9 @@ where
                         if let Err(e) =
                             futures::ready!(read_exact(Reading::Message, &mut payload, cx))
                         {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                return Poll::Ready(None);
+                            }
                             return Some(Err(e.into())).into();
                         }
                         *this.read_bytes += length as u64 + 4;
@@ -137,6 +150,9 @@ where
                         if let Err(e) =
                             futures::ready!(read_exact(Reading::Message, &mut buf[read..], cx))
                         {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                return Poll::Ready(None);
+                            }
                             return Some(Err(e.into())).into();
                         }
                         *this.read_bytes += *this.message_length as u64 + 4;
@@ -166,6 +182,9 @@ where
 
         let mut buf = [0u8; 4];
         if let Err(e) = futures::ready!(read_exact(Reading::Length, &mut buf, cx)) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Poll::Ready(None);
+            }
             return Some(Err(e.into())).into();
         }
         let length = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -173,6 +192,9 @@ where
 
         let mut payload = vec![0u8; length as _];
         if let Err(e) = futures::ready!(read_exact(Reading::Message, &mut payload, cx)) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Poll::Ready(None);
+            }
             return Some(Err(e.into())).into();
         }
         *this.read_bytes += length as u64 + 4;
