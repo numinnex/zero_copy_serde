@@ -106,8 +106,7 @@ where
                         let length = u32::from_le_bytes(buf[0..4].try_into().unwrap());
                         *this.message_length = length;
 
-                        let mut payload = Vec::with_capacity(length as _);
-                        payload.fill(0);
+                        let mut payload = vec![0u8; length as _];
                         if let Err(e) =
                             futures::ready!(read_exact(Reading::Message, &mut payload, cx))
                         {
@@ -172,8 +171,7 @@ where
         let length = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         *this.message_length = length;
 
-        let mut payload = Vec::with_capacity(length as _);
-        payload.fill(0);
+        let mut payload = vec![0u8; length as _];
         if let Err(e) = futures::ready!(read_exact(Reading::Message, &mut payload, cx)) {
             return Some(Err(e.into())).into();
         }

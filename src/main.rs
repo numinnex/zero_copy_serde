@@ -1,6 +1,6 @@
 use std::{
     marker::PhantomData,
-    os::unix::prelude::OpenOptionsExt,
+    os::unix::prelude::{MetadataExt, OpenOptionsExt},
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
@@ -17,17 +17,17 @@ use monoio::{
 use pin_project::pin_project;
 use rand::Rng;
 use storage::DmaStorage;
-use stream::LogReader;
+use stream::{LogReader, MessageStream};
 
 pub mod dma_buf;
 pub mod storage;
 pub mod stream;
 const O_DIRECT: i32 = 0x4000;
 
-#[monoio::main(worker_threads = 1, driver = "io_uring")]
+#[monoio::main(worker_threads = 1, driver = "io_uring", entries = 512)]
 async fn main() {
     let file_path = "test";
-    let block_size = 100 * 4096;
+    let block_size = 1000 * 4096;
 
     let file = OpenOptions::new()
         .read(true)
@@ -60,11 +60,27 @@ async fn main() {
             }
         })
         .await;
-    /*
-        let storage = Storage::new(file);
-        let log: Log<Storage, DmaBuf> = Log::new(storage, block_size);
-        let reader = log.read_blocks(0, 1000).into_async_read();
-    */
+    drop(file);
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(O_DIRECT)
+        .create(true)
+        .open(file_path)
+        .await
+        .unwrap();
+
+    let limit = file.metadata().await.unwrap().size();
+    let storage = Storage::new(file);
+    let log: Log<Storage, DmaBuf> = Log::new(storage, block_size);
+    let reader = log.read_blocks(0, limit).into_async_read();
+    let stream = MessageStream::new(reader, 4096);
+    let messages = stream
+        .inspect_ok(|msg| println!("message offset: {}", msg.offset))
+        .try_collect::<Vec<_>>().await.unwrap();
+
+    println!("done reading messages");
 }
 
 pub struct Message {
@@ -91,9 +107,9 @@ impl Message {
     }
 
     fn from_bytes(data: &[u8]) -> Self {
-        let id = u128::from_be_bytes(data[0..16].try_into().unwrap());
-        let offset = u64::from_be_bytes(data[16..24].try_into().unwrap());
-        let timestamp = u64::from_be_bytes(data[24..32].try_into().unwrap());
+        let id = u128::from_le_bytes(data[0..16].try_into().unwrap());
+        let offset = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        let timestamp = u64::from_le_bytes(data[24..32].try_into().unwrap());
 
         let bytes = data[32..].to_vec();
 
@@ -112,16 +128,18 @@ fn generate_messages_1gb() -> Vec<Message> {
     let mut total_size: usize = 0;
     let mut messages = Vec::new();
 
+    let mut i = 0;
     while total_size < 1_073_741_824 {
         let message_length = rng.gen_range(1024..8192);
         let bytes: Vec<u8> = (0..message_length).map(|_| rng.gen()).collect();
         let message = Message {
             length: message_length as u32 + 16 + 8 + 8,
-            id: rng.gen(),
-            offset: total_size as u64,
-            timestamp: rng.gen(),
+            id: i as u128,
+            offset: i,
+            timestamp: i,
             bytes,
         };
+        i += 1;
 
         total_size += message.total_length() as usize;
         messages.push(message);
@@ -148,7 +166,8 @@ where
 }
 
 impl Storage {
-    pub fn new(file: Rc<File>) -> Self {
+    pub fn new(file: File) -> Self {
+        let file = Rc::new(file);
         Self { file }
     }
 }
