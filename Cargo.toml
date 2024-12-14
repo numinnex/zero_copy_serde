@@ -9,3 +9,4 @@ futures-util = "0.3.31"
 monoio = { version = "0.2.4", features = ["async-cancel", "sync", "macros", "poll-io", "iouring"] }
 pin-project = "1.1.7"
 rand = "0.8"
+rkyv = { version = "0.8.9", features = ["aligned"]}
