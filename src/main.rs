@@ -1,119 +1,65 @@
-use monoio::{FusionDriver, FusionRuntime};
 use rand::{random, Rng};
-use rkyv::{util::AlignedVec, Archive, Deserialize, Serialize};
+use rkyv::{
+    boxed::ArchivedBox, rancor::Fallible, rend::u32_le, ser::{Allocator, Writer}, util::AlignedVec, vec::ArchivedVec, with::{InlineAsBox, With}, Archive, Deserialize, DeserializeUnsized, Serialize
+};
 use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    collections::HashMap, ops::{Deref, DerefMut}, time::{SystemTime, UNIX_EPOCH}
 };
 
-enum Command {
-    AppendMessages(AlignedVec),
-    ReceiveMessages(u64, u32),
+#[derive(Archive, Serialize, Deserialize)]
+struct Example {
+    name: String,
+    value: Vec<i32>,
 }
 
+struct Test<'a> {
+    message: &'a mut ArchivedMessage
+}
+
+impl<'a> Deref for Test<'a> {
+    type Target = ArchivedMessage;
+
+    fn deref(&self) -> &Self::Target {
+        self.message
+    }
+}
+
+impl<'a> DerefMut for Test<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.message
+    }
+}
+
+
 fn main() {
-    let (tx_command, rx_command) = async_channel::bounded(1024);
-    let (tx_result, rx_result) = async_channel::bounded(1024);
+        let base_offset = 0;
+        let base_timestamp = get_timestamp();
+        let messages = generate_n_messages(base_offset, base_timestamp, 10);
+        let batch = batch(base_offset, base_timestamp, messages);
 
-    // Required for the channel to not get closed.
-    let rx_result = rx_result.clone();
-    let t1 = std::thread::spawn(move || {
-        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-            .enable_timer()
-            .build()
-            .unwrap();
+        let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&batch).unwrap();
+        let mut serde_batch = unsafe { rkyv::access_unchecked_mut::<ArchivedBatch>(&mut bytes) };
+        println!("offset before: {}", &serde_batch.messages[0].offset);
+        rkyv::munge::munge!(let ArchivedBatch {base_offset, base_timestamp, mut messages} = serde_batch);
+        let len = messages.len();
+        let ptr = messages.as_ptr();
+        let slice = unsafe {std::slice::from_raw_parts_mut(ptr as *mut ArchivedMessage, len)};
+        for message in slice {
+            message.offset = u32_le::from_native(32);
+        }
+        let mut serde_batch = unsafe { rkyv::access_unchecked::<ArchivedBatch>(&bytes) };
+        println!("offset after: {}", &serde_batch.messages[0].offset);
+    }
 
-        rt.block_on(
-        async {
-            let mut base_offset = 0;
-            let mut angel = 0;
-            loop {
-                let command = if angel % 42 == 0 {
-                    // Generate 10 messages
-                    let base_timestamp = get_timestamp();
-                    let messages = generate_n_messages(base_offset, base_timestamp, 10);
-                    base_offset += 10;
-                    angel = base_timestamp / 69420;
-                    let batch = batch(base_offset, base_timestamp, messages);
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&batch).unwrap();
-                    let command = Command::AppendMessages(bytes);
-                    monoio::time::sleep(Duration::from_millis(100)).await;
-                    command
-                } else {
-                    let start_offset = base_offset.saturating_sub(42);
-                    let count = 5;
-                    let command = Command::ReceiveMessages(start_offset, count);
-                    command
-                };
+struct Foo {
+    offset: u64,
+    timestamp: u64,
+}
 
-                let result = monoio::select! {
-                    result = tx_command.send(command) => {
-                        if let Err(e) = result {
-                            // Drop the message.
-                            println!("Dropping the command message, due to channel being closed, e: {}", e);
-                            continue;
-                        }
-                        None
-                    },
-                    result = rx_result.recv() => {
-                        if let Ok(result) = result {
-                            Some(result)
-                        } else {
-                            None
-                        }
-                    }
-                };
-            }
-        });
-    });
-
-    // Required for the channel to not get closed.
-    let rx_command = rx_command.clone();
-    let t2 = std::thread::spawn(move || {
-        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-            .enable_timer()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let mut system = System::new();
-            loop {
-                if let Ok(command) = rx_command.recv().await {
-                    match command {
-                        Command::AppendMessages(bytes) => {
-                            let batch = rkyv::access::<ArchivedBatch, rkyv::rancor::Error>(&bytes).unwrap();
-                            let batch_base_offset = batch.base_offset.to_native();
-                            system.cache.entry(batch_base_offset).or_insert(bytes);
-                        }
-                        Command::ReceiveMessages(start_offset, count) => {
-                            let offset_alignment = start_offset % 10;
-                            if offset_alignment == 0 {
-
-                            } else {
-                                let base_offset = start_offset - offset_alignment;
-                                let end_offset = start_offset + count as u64;
-                                assert!(end_offset - base_offset < 10);
-                                if let Some(bytes) = system.cache.get(&base_offset) {
-                                    let batch = rkyv::access::<ArchivedBatch, rkyv::rancor::Error>(bytes).unwrap();
-                                    let bytes = rkyv::to_bytes(&batch.messages).unwrap();
-                                }
-                            }
-
-                            if let Err(e) = tx_result.send(()).await {
-                                // Drop the message.
-                                println!(
-                                    "Dropping the response message, due to channel being closed, e: {}", e
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    });
-    t1.join().expect("Failed to join t1");
-    t2.join().expect("Failed to join t2");
+struct ServerBatch {
+    base_offset: u64,
+    base_timestamp: u64,
+    messages: Vec<Message>,
 }
 
 fn batch(base_offset: u64, base_timestamp: u64, messages: Vec<Message>) -> Batch {
@@ -130,7 +76,7 @@ fn generate_n_messages(base_offset: u64, base_timestamp: u64, size: usize) -> Ve
         let offset = i;
         let timestamp = get_timestamp() - base_timestamp;
         let payload = generate_random_payload(1024);
-        messages.push(Message::new_without_headers(
+        messages.push(Message::new(
             i as _,
             timestamp as _,
             payload,
@@ -145,49 +91,14 @@ fn get_timestamp() -> u64 {
 }
 
 fn generate_random_payload(size: usize) -> Vec<u8> {
-    let random_bytes: Vec<u8> = (0..1000).map(|_| rand::thread_rng().gen()).collect();
+    let random_bytes = vec![69u8; size];
     random_bytes
 }
 
 fn generate_id() -> u128 {
-    random()
+    69420u128
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
-struct HeaderKey(String);
-
-impl Hash for ArchivedHeaderKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-impl PartialEq for ArchivedHeaderKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Eq for ArchivedHeaderKey {}
-
-#[derive(Archive, Deserialize, Serialize, Debug)]
-struct HeaderValue {
-    kind: HeaderKind,
-    payload: Vec<u8>,
-}
-
-#[derive(Archive, Deserialize, Serialize, Debug)]
-enum HeaderKind {
-    Raw,
-    String,
-    Bool,
-    Uint32,
-    Uint64,
-}
-
-#[derive(Archive, Deserialize, Serialize, Debug)]
-struct Headers {
-    inner: HashMap<HeaderKey, HeaderValue>,
-}
 
 #[derive(Archive, Deserialize, Serialize, Debug)]
 struct Batch {
@@ -201,40 +112,55 @@ struct Message {
     id: u128,
     offset: u32,
     timestamp: u32,
-    headers: Option<Headers>,
     payload: Vec<u8>,
 }
 
-impl Message {
-    fn new(offset: u32, timestamp: u32, headers: Option<Headers>, payload: Vec<u8>) -> Self {
-        Self {
-            id: generate_id(),
-            offset,
-            timestamp,
-            headers,
-            payload,
-        }
-    }
+impl Archive for ArchivedMessage {
+    type Archived = Self;
 
-    fn new_without_headers(offset: u32, timestamp: u32, payload: Vec<u8>) -> Self {
+    type Resolver = MessageResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::munge::munge!(
+            let Self { id, offset, timestamp, payload } = out);
+
+        self.id.resolve(resolver.id, id);
+        self.offset.resolve(resolver.offset, offset);
+        self.timestamp.resolve(resolver.timestamp, timestamp);
+        ArchivedVec::resolve_from_len(self.payload.len(), resolver.payload, payload);
+    }
+}
+
+impl<S: Fallible + Writer + Allocator + ?Sized> Serialize<S> for ArchivedMessage {
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(MessageResolver {
+            id: self.id.serialize(serializer)?,
+            offset: self.offset.serialize(serializer)?,
+            timestamp: self.timestamp.serialize(serializer)?,
+            payload: ArchivedVec::serialize_from_slice(self.payload.as_slice(), serializer)?,
+        })
+    }
+}
+
+impl Message {
+    fn new(offset: u32, timestamp: u32, payload: Vec<u8>) -> Self {
         Self {
             id: generate_id(),
             offset,
             timestamp,
-            headers: None,
             payload,
         }
     }
 }
 
 struct System {
-    pub cache: HashMap<u64, AlignedVec>
+    pub cache: HashMap<u64, AlignedVec>,
 }
 
 impl System {
     fn new() -> Self {
         Self {
-            cache: Default::default()
+            cache: Default::default(),
         }
     }
 }
